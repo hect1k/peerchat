@@ -21,7 +21,7 @@ To run **PeerChat**, ensure that you have Python 3.x installed on your machine. 
 ### 1. **Clone the Repository**
 
 ```bash
-git clone https://github.com/nnisarggada/peerchat.git
+git clone https://github.com/hect1k/peerchat.git
 cd peerchat
 ```
 
