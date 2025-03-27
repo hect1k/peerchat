@@ -33,6 +33,7 @@ def handle_peer_connection(client_socket):
 def start_tracker():
     """Starts the tracker server to listen for incoming node registrations."""
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((TRACKER_HOST, TRACKER_PORT))
     server_socket.listen(5)
 
