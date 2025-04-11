@@ -23,6 +23,11 @@ def handle_peer_connection(client_socket):
             elif action == "get_peers":
                 client_socket.sendall(json.dumps(PEERS).encode())  # Send current peers
 
+            elif action == "populate":
+                peers = message.get("peers", {})
+                PEERS.update(peers)
+                print("✅ Tracker populated with peers:", peers)
+
             else:
                 print(f"⚠️ Unknown action: {action}")
     except Exception as e:

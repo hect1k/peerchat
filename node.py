@@ -3,31 +3,28 @@ import threading
 import json
 import time
 import curses
+import subprocess
 
 TRACKER_HOST = "localhost"
-TRACKER_PORT = 5000  # Fixed tracker port
-PEER_UPDATE_INTERVAL = 5  # Refresh peer list every 5 seconds
+TRACKER_PORT = 5000
+PEER_UPDATE_INTERVAL = 5
+ELECTION_TIMEOUT = 3
+
 
 class ChatNode:
     def __init__(self, username):
         self.username = username
         self.port = self.find_available_port()
-        self.peers = {}  # List of other chat nodes
+        self.peers = {}
         self.running = True
-        self.messages = []  # Store chat messages
+        self.messages = []
 
-        # Try connecting to the tracker; if it fails, raise an error
         if not self.connect_to_tracker():
-            print("⚠️ No tracker found. Exiting...")
-            return
+            print("⚠️ No tracker found. Initiating election...")
+            self.start_election()
 
-        # Start listening for messages
         threading.Thread(target=self.start_server, daemon=True).start()
-
-        # Periodic peer updates
         threading.Thread(target=self.update_peers, daemon=True).start()
-
-        # Start the chat TUI
         curses.wrapper(self.chat_interface)
 
     def find_available_port(self):
@@ -39,32 +36,28 @@ class ChatNode:
 
     def connect_to_tracker(self):
         try:
-            tracker_socket = socket.create_connection((TRACKER_HOST, TRACKER_PORT))
+            tracker_socket = socket.create_connection((TRACKER_HOST, TRACKER_PORT), timeout=2)
             data = {"action": "register", "port": self.port}
             tracker_socket.sendall(json.dumps(data).encode())
             response = tracker_socket.recv(4096).decode()
             tracker_socket.close()
-
             self.peers = json.loads(response)
             return True
-        except ConnectionRefusedError:
+        except Exception:
             return False
 
     def update_peers(self):
-        """Periodically fetches the latest peer list from the tracker."""
         while self.running:
             try:
-                tracker_socket = socket.create_connection((TRACKER_HOST, TRACKER_PORT))
+                tracker_socket = socket.create_connection((TRACKER_HOST, TRACKER_PORT), timeout=2)
                 data = {"action": "get_peers"}
                 tracker_socket.sendall(json.dumps(data).encode())
                 response = tracker_socket.recv(4096).decode()
                 tracker_socket.close()
-
                 self.peers = json.loads(response)
-
             except Exception:
-                pass
-
+                print("⚠️ Lost connection to tracker. Initiating election...")
+                self.start_election()
             time.sleep(PEER_UPDATE_INTERVAL)
 
     def start_server(self):
@@ -83,31 +76,37 @@ class ChatNode:
         try:
             message = json.loads(client_socket.recv(1024).decode())
 
-            client_socket.close()
+            if message.get("type") == "election":
+                client_socket.sendall(b"ok")
+                threading.Thread(target=self.start_election, daemon=True).start()
+                return
 
-            sender_name = message["username"]
-            chat_msg = message["message"]
-
+            sender_name = message.get("username", "System")
+            chat_msg = message.get("message", "")
             formatted_msg = f"💬 {sender_name}: {chat_msg}"
             if formatted_msg not in self.messages:
                 self.messages.append(formatted_msg)
 
         except Exception:
             pass
+        finally:
+            client_socket.close()
 
     def broadcast_message(self, message):
-        """Sends a chat message to all peers."""
-        chat_msg = json.dumps({"username": self.username, "message": message})
+        formatted_msg = f"💬 {self.username}: {message}"
+        if formatted_msg not in self.messages:
+            self.messages.append(formatted_msg)
 
+        chat_msg = json.dumps({"username": self.username, "message": message})
         for peer_port in self.peers.values():
             self.send_message(peer_port, chat_msg)
 
     def send_message(self, peer_port, message):
         try:
-            with socket.create_connection(("localhost", peer_port)) as sock:
+            with socket.create_connection(("localhost", peer_port), timeout=2) as sock:
                 sock.sendall(message.encode())
         except Exception:
-            pass  # Peer might be down
+            pass
 
     def chat_interface(self, stdscr):
         stdscr.clear()
@@ -132,7 +131,7 @@ class ChatNode:
                     if input_text.strip():
                         self.broadcast_message(input_text)
                     input_text = ""
-                elif key == 127:
+                elif key == 127 or key == curses.KEY_BACKSPACE:
                     input_text = input_text[:-1]
                 elif key != -1 and key < 256:
                     input_text += chr(key)
@@ -141,6 +140,54 @@ class ChatNode:
         except KeyboardInterrupt:
             self.running = False
             print("\nExiting gracefully...")
+
+    def start_election(self):
+        higher_ports = [int(p) for p in self.peers.values() if int(p) > self.port]
+        responded = False
+
+        for peer_port in higher_ports:
+            try:
+                with socket.create_connection(("localhost", peer_port), timeout=1) as sock:
+                    sock.sendall(json.dumps({"type": "election"}).encode())
+                    sock.settimeout(ELECTION_TIMEOUT)
+                    if sock.recv(1024):
+                        responded = True
+                        break
+            except Exception:
+                continue
+
+        if not responded:
+            print("👑 No higher node responded. I am elected leader.")
+            self.start_new_tracker_process()
+            self.announce_leader()
+
+    def start_new_tracker_process(self):
+        # Start tracker in background
+        try:
+            subprocess.Popen(["python", "tracker.py"])
+            time.sleep(1)  # Give it a moment to boot
+        except Exception as e:
+            print(f"❌ Failed to start tracker: {e}")
+            return
+
+        # Populate the tracker with known peers
+        try:
+            tracker_socket = socket.create_connection((TRACKER_HOST, TRACKER_PORT), timeout=2)
+            data = {"action": "populate", "peers": self.peers}
+            tracker_socket.sendall(json.dumps(data).encode())
+            tracker_socket.close()
+        except Exception as e:
+            print(f"⚠️ Failed to populate tracker: {e}")
+
+    def announce_leader(self):
+        announcement = f"👑 Node {self.port} elected leader. New tracker started."
+        self.messages.append(announcement)
+
+        chat_msg = json.dumps({"username": "System", "message": announcement})
+        for peer_port in self.peers.values():
+            if peer_port != self.port:
+                self.send_message(peer_port, chat_msg)
+
 
 def main():
     username = input("Enter your username: ")
